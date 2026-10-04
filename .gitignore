@@ -1,0 +1,11 @@
+# Environnement Python
+.venv/
+__pycache__/
+*.pyc
+
+# Données et infos sensibles : normalement dans ../Data, filet de sécurité si copiées ici
+Data/
+data/
+*.db
+*.fit
+.env
