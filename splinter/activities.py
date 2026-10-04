@@ -1,37 +1,19 @@
-"""Synchronise l'historique d'activités Garmin Connect en local.
+"""Synchronisation des activités Garmin Connect.
 
-- Métadonnées des activités -> Data/garmin.db (SQLite, table `activities`)
+- Métadonnées des activités -> table `activities` de Data/garmin.db
 - Fichiers d'origine (.fit)  -> Data/fit/<activity_id>.fit
-
-Usage (depuis le dossier Splinter) :
-    python -m splinter.garmin_sync            # incrémental : nouvelles activités
-    python -m splinter.garmin_sync --full     # parcourt tout l'historique
-    python -m splinter.garmin_sync --no-fit   # métadonnées seulement, sans les .fit
-
-Les identifiants ne sont jamais stockés : ils sont demandés à la première connexion,
-puis seuls les jetons OAuth sont conservés dans Data/garmin_tokens.
 """
 
-import argparse
-import getpass
 import io
 import json
 import sqlite3
-import sys
 import time
 import zipfile
 from pathlib import Path
 
-from garminconnect import (
-    Garmin,
-    GarminConnectAuthenticationError,
-    GarminConnectNotFoundError,
-    GarminConnectTooManyRequestsError,
-)
+from garminconnect import Garmin, GarminConnectNotFoundError, GarminConnectTooManyRequestsError
 
-from splinter.config import DATA_DIR, DB_PATH, FIT_DIR, TOKEN_DIR
-
-TOKENSTORE = str(TOKEN_DIR)
+from splinter.config import FIT_DIR
 
 PAGE_SIZE = 100
 DOWNLOAD_PAUSE_S = 0.5  # pause entre téléchargements pour ménager l'API
@@ -57,31 +39,9 @@ CREATE INDEX IF NOT EXISTS idx_activities_start ON activities(start_time);
 """
 
 
-def connect() -> Garmin:
-    """Connexion via jetons sauvegardés, sinon via email/mot de passe (+ MFA)."""
-    TOKEN_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        api = Garmin()
-        api.login(TOKENSTORE)
-        return api
-    except Exception:  # pas de jetons, ou jetons invalides/expirés
-        pass
-
-    print("Première connexion (ou jetons expirés) : identifiants Garmin Connect requis.")
-    email = input("Email : ").strip()
-    password = getpass.getpass("Mot de passe : ")
-    api = Garmin(email, password, prompt_mfa=lambda: input("Code MFA : ").strip())
-    api.login(TOKENSTORE)
-    print(f"Connecté. Jetons enregistrés dans {TOKENSTORE}")
-    return api
-
-
-def open_db() -> sqlite3.Connection:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    FIT_DIR.mkdir(exist_ok=True)
-    db = sqlite3.connect(DB_PATH)
+def init_schema(db: sqlite3.Connection) -> None:
+    FIT_DIR.mkdir(parents=True, exist_ok=True)
     db.executescript(SCHEMA)
-    return db
 
 
 def upsert_activity(db: sqlite3.Connection, a: dict) -> None:
@@ -187,27 +147,3 @@ def save_original(activity_id: int, blob: bytes) -> str:
     except zipfile.BadZipFile:
         (FIT_DIR / f"{activity_id}.fit").write_bytes(blob)
     return "ok"
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--full", action="store_true", help="reparcourir tout l'historique")
-    parser.add_argument("--no-fit", action="store_true", help="ne pas télécharger les fichiers .fit")
-    args = parser.parse_args()
-
-    try:
-        api = connect()
-    except GarminConnectAuthenticationError as e:
-        sys.exit(f"Échec de connexion : {e}")
-
-    with open_db() as db:
-        new = sync_activities(api, db, args.full)
-        print(f"{new} nouvelle(s) activité(s).")
-        if not args.no_fit:
-            download_fits(api, db)
-        total = db.execute("SELECT COUNT(*) FROM activities").fetchone()[0]
-        print(f"Base : {DB_PATH} ({total} activités)")
-
-
-if __name__ == "__main__":
-    main()
