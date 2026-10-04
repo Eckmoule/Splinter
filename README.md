@@ -12,10 +12,13 @@ Sport/
 │       ├── garmin_client.py  # connexion Garmin Connect + base locale
 │       ├── activities.py     # synchro des activités et fichiers .fit
 │       ├── health.py         # synchro des données santé quotidiennes
+│       ├── fit_analysis.py   # analyse seconde par seconde des .fit (km, dérive)
+│       ├── export.py         # export course à pied lisible par Claude
 │       └── sync.py           # point d'entrée de la synchro
 └── Data/              # données et infos sensibles, hors git
     ├── garmin.db          # base SQLite (activités + santé)
     ├── fit/               # fichiers .fit d'origine
+    ├── SplinterDrive/     # export pour Claude, synchronisé par Google Drive
     └── garmin_tokens/     # jetons de connexion Garmin
 ```
 
@@ -42,6 +45,7 @@ Options :
 - `--full` : reparcourir toute la liste des activités
 - `--no-fit` : sans télécharger les fichiers .fit
 - `--no-health` : activités seulement
+- `--no-export` : sans régénérer l'export pour Claude
 - `--since AAAA-MM-JJ` : début de l'historique santé (par défaut : première activité)
 
 ## Contenu de la base
@@ -50,4 +54,17 @@ Options :
 |---|---|
 | `activities` | une ligne par activité : type, distance, durée, FC, D+… + JSON Garmin complet |
 | `daily_health` | une ligne par jour : pas, FC repos, stress, Body Battery, sommeil, HRV, disposition à l'entraînement, charge aiguë/chronique, VO2max, poids |
+| `run_km` | une ligne par kilomètre de chaque sortie course, calculée depuis les .fit |
+| `run_fit_metrics` | par sortie : FC et allure par moitié, découplage, FC à allure fixe |
 | `health_raw` | réponses brutes de l'API santé (par jour et par type), source de `daily_health` |
+
+## Export pour Claude
+
+À la fin de chaque synchro, `splinter.export` régénère dans `Data/SplinterDrive` des fichiers
+compacts sur la course à pied (`LISEZMOI.md`, `courses.csv`, `courses_km.csv`,
+`semaines.csv`, `sante_quotidienne.csv`). Ce dossier est synchronisé par Google Drive pour ordinateur, ce qui
+permet d'en discuter avec Claude depuis le téléphone. Lancement seul :
+
+```
+.\.venv\Scripts\python -m splinter.export
+```

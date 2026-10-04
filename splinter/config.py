@@ -13,3 +13,4 @@ DATA_DIR = Path(os.getenv("SPLINTER_DATA", REPO_DIR.parent / "Data")).resolve()
 DB_PATH = DATA_DIR / "garmin.db"        # base SQLite des activités
 FIT_DIR = DATA_DIR / "fit"              # fichiers .fit d'origine
 TOKEN_DIR = DATA_DIR / "garmin_tokens"  # jetons OAuth Garmin Connect
+EXPORT_DIR = DATA_DIR / "SplinterDrive"  # export pour Claude, synchronisé par Google Drive

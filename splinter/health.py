@@ -25,6 +25,12 @@ CREATE TABLE IF NOT EXISTS health_raw (
     fetched_at  TEXT NOT NULL,
     PRIMARY KEY (date, kind)
 );
+-- réglages du profil (zones cardiaques...), une ligne par clé
+CREATE TABLE IF NOT EXISTS profile (
+    key         TEXT PRIMARY KEY,
+    raw_json    TEXT,
+    fetched_at  TEXT NOT NULL
+);
 -- période déjà couverte par les endpoints « plage de dates »
 CREATE TABLE IF NOT EXISTS health_sync_state (
     kind          TEXT PRIMARY KEY,
@@ -96,6 +102,14 @@ def _mark_covered(db: sqlite3.Connection, kind: str, since: date) -> None:
            ON CONFLICT(kind) DO UPDATE SET covered_from=MIN(covered_from, excluded.covered_from)""",
         (kind, since.isoformat()),
     )
+
+
+def sync_profile(api: Garmin, db: sqlite3.Connection) -> None:
+    db.execute(
+        "INSERT OR REPLACE INTO profile (key, raw_json, fetched_at) VALUES (?, ?, ?)",
+        ("hr_zones", json.dumps(api.get_heart_rate_zones()), datetime.now().isoformat(timespec="seconds")),
+    )
+    db.commit()
 
 
 def sync_ranges(api: Garmin, db: sqlite3.Connection, since: date, today: date) -> None:
@@ -260,6 +274,7 @@ def rebuild_daily(db: sqlite3.Connection) -> int:
 def sync_health(api: Garmin, db: sqlite3.Connection, since: date) -> None:
     today = date.today()
     print(f"Données santé depuis le {since} ...")
+    sync_profile(api, db)
     sync_ranges(api, db, since, today)
     sync_per_day(api, db, since, today)
     n = rebuild_daily(db)
