@@ -95,6 +95,8 @@ def sync_activities(api: Garmin, db: sqlite3.Connection, full: bool) -> int:
         for a in page:
             if a["activityId"] not in known:
                 page_new += 1
+                print(f"  + {(a.get('startTimeLocal') or '')[:16]} {(a.get('activityType') or {}).get('typeKey')} "
+                      f"« {a.get('activityName')} » {(a.get('distance') or 0) / 1000:.1f} km")
             upsert_activity(db, a)
         db.commit()
         new += page_new

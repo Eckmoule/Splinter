@@ -575,6 +575,7 @@ def export(out_dir: Path = EXPORT_DIR) -> None:
     _write_csv(out_dir / "sante_quotidienne.csv", [c for c, _ in SANTE_COLUMNS], _sante(health))
     (out_dir / "LISEZMOI.md").write_text(_lisezmoi(runs, health, zones, semaines), encoding="utf-8")
     print(f"Export Claude : {out_dir} ({len(runs)} sorties, {len(semaines)} semaines, {len(health)} jours)")
+    print(f"  dernière sortie : {runs[-1][0][:16]} ; dernier jour santé : {max(health) if health else '-'}")
 
 
 if __name__ == "__main__":

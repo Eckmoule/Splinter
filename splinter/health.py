@@ -271,11 +271,31 @@ def rebuild_daily(db: sqlite3.Connection) -> int:
     return len(rows)
 
 
+def _nights(db: sqlite3.Connection) -> set[str]:
+    """Jours pour lesquels une nuit de sommeil est enregistrée."""
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE name='daily_health'").fetchone():
+        return set()
+    return {r[0] for r in db.execute("SELECT date FROM daily_health WHERE sleep_s IS NOT NULL")}
+
+
+def _log_new_nights(db: sqlite3.Connection, before: set[str]) -> None:
+    new = sorted(_nights(db) - before)
+    print(f"  nouvelles nuits : {len(new)}")
+    for d in new[-14:]:
+        h = db.execute("SELECT sleep_s, sleep_score, hrv_night, rhr, readiness FROM daily_health WHERE date=?",
+                       (d,)).fetchone()
+        sleep_s, score, hrv, rhr, readiness = h
+        print(f"  + {d} : sommeil {sleep_s // 3600}h{sleep_s % 3600 // 60:02d} (score {score}), "
+              f"HRV {hrv}, FC repos {rhr}, disposition {readiness}")
+
+
 def sync_health(api: Garmin, db: sqlite3.Connection, since: date) -> None:
     today = date.today()
     print(f"Données santé depuis le {since} ...")
+    before = _nights(db)
     sync_profile(api, db)
     sync_ranges(api, db, since, today)
     sync_per_day(api, db, since, today)
     n = rebuild_daily(db)
     print(f"  daily_health : {n} jours")
+    _log_new_nights(db, before)

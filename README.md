@@ -68,3 +68,16 @@ permet d'en discuter avec Claude depuis le téléphone. Lancement seul :
 ```
 .\.venv\Scripts\python -m splinter.export
 ```
+
+## Synchro automatique chaque soir
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\planifier_synchro.ps1 -Heure 22:00
+```
+
+Crée une tâche Windows « Splinter - synchro Garmin » qui lance `splinter.nightly` chaque soir,
+sans fenêtre. Elle réveille le PC s'il est en veille et rattrape la synchro au prochain
+démarrage s'il était éteint. Le PC reste éveillé 3 min après la synchro pour laisser
+Google Drive envoyer l'export, puis Windows le rendort. Journal : `Data/logs/sync.log`
+(source du réveil, nouvelles sorties et nuits récupérées, dates les plus récentes exportées). Si les jetons Garmin expirent, la
+tâche échoue (voir le journal) : relancer une fois `python -m splinter.sync` à la main.
