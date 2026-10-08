@@ -1,17 +1,25 @@
 """Lanceur de la synchro planifiée (sans console).
 
+Lancé par la tâche Windows chaque soir à heure fixe ET à chaque sortie de veille : si le
+minuteur réveille le PC en retard, Windows considère le créneau comme manqué et ne rattrape la
+tâche qu'une dizaine de minutes plus tard, alors que le PC se rendort au bout de 2 min. Le
+déclencheur « sortie de veille » démarre tout de suite ; `--if-older-than` évite alors de
+resynchroniser à chaque réveil dans la journée.
+
 Redirige toute la sortie vers Data/logs/sync.log et n'attend aucune saisie : si Garmin
 redemande les identifiants (jetons expirés), l'erreur est journalisée et il faut relancer
 une fois `python -m splinter.sync` à la main.
 
-Pendant la synchro puis KEEP_AWAKE_AFTER_S secondes, le PC est maintenu éveillé pour
-laisser à Google Drive le temps d'envoyer l'export ; Windows le rendort ensuite selon ses
-réglages habituels (2 min sans utilisation après un réveil automatique).
+Dès le démarrage, pendant la synchro puis KEEP_AWAKE_AFTER_S secondes, le PC est maintenu
+éveillé pour laisser à Google Drive le temps d'envoyer l'export ; Windows le rendort ensuite
+selon ses réglages habituels.
 
-Usage : pythonw -m splinter.nightly
+Usage : pythonw -m splinter.nightly [--if-older-than HEURES]
 """
 
+import argparse
 import ctypes
+import socket
 import subprocess
 import sys
 import time
@@ -22,8 +30,11 @@ from splinter.config import DATA_DIR
 
 LOG_DIR = DATA_DIR / "logs"
 LOG_FILE = LOG_DIR / "sync.log"
+LAST_OK_FILE = LOG_DIR / "derniere_synchro_ok.txt"
 MAX_LOG_BYTES = 1_000_000
 KEEP_AWAKE_AFTER_S = 3 * 60
+NETWORK_HOST = ("connect.garmin.com", 443)
+NETWORK_WAIT_S = 120  # après un réveil, le réseau met parfois quelques secondes à revenir
 
 ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001
@@ -51,7 +62,33 @@ def _last_wake() -> str:
         return " | ".join(lines[-3:]) or "aucun détail"
 
 
+def _hours_since_last_ok() -> float | None:
+    try:
+        last = datetime.fromisoformat(LAST_OK_FILE.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return (datetime.now() - last).total_seconds() / 3600
+
+
+def _wait_for_network() -> bool:
+    deadline = time.monotonic() + NETWORK_WAIT_S
+    while True:
+        try:
+            socket.create_connection(NETWORK_HOST, timeout=5).close()
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(5)
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--if-older-than", type=float, metavar="HEURES",
+                        help="ne rien faire si la dernière synchro réussie date de moins de HEURES")
+    args = parser.parse_args()
+
+    _keep_awake(True)  # tout de suite : Windows rendort vite un PC réveillé par un minuteur
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     if LOG_FILE.exists() and LOG_FILE.stat().st_size > MAX_LOG_BYTES:
         LOG_FILE.replace(LOG_FILE.with_suffix(".old.log"))
@@ -60,16 +97,27 @@ def main() -> int:
     with LOG_FILE.open("a", encoding="utf-8") as log:
         sys.stdout = sys.stderr = log
         sys.stdin = None  # aucune saisie possible en mode planifié
+
+        age = _hours_since_last_ok()
+        if args.if_older_than is not None and age is not None and age < args.if_older_than:
+            print(f"{datetime.now():%Y-%m-%d %H:%M:%S} — déclenchement ignoré : "
+                  f"dernière synchro réussie il y a {age:.1f} h")
+            _keep_awake(False)
+            return 0
+
         print(f"\n===== {datetime.now():%Y-%m-%d %H:%M:%S} — synchro planifiée =====")
         print(f"Dernier réveil du PC : {_last_wake()}")
         log.flush()
-        _keep_awake(True)
         code = 1
         try:
-            sys.argv = ["splinter.sync"]
-            from splinter import sync
-            sync.main()
-            code = 0
+            if not _wait_for_network():
+                print(f"Réseau indisponible après {NETWORK_WAIT_S} s : synchro abandonnée.")
+            else:
+                sys.argv = ["splinter.sync"]
+                from splinter import sync
+                sync.main()
+                LAST_OK_FILE.write_text(datetime.now().isoformat(timespec="seconds"), encoding="utf-8")
+                code = 0
         except SystemExit as e:
             print(f"Arrêt : {e}")
         except Exception:

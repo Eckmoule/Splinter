@@ -2,6 +2,7 @@
 
 Pour chaque sortie (route, trail...) dont le .fit est disponible, calcule et met en cache :
 - `run_km`          : une ligne par kilomètre (allure, FC, D+/D-, cadence, puissance)
+- `run_laps`        : une ligne par tour enregistré par la montre (auto au km, fraction de séance, manuel)
 - `run_fit_metrics` : indicateurs de la sortie (dérive cardiaque, découplage, FC à allure fixe)
 
 Les résultats sont versionnés : si ANALYSIS_VERSION change, tout est recalculé.
@@ -14,7 +15,7 @@ import fitdecode
 
 from splinter.config import FIT_DIR
 
-ANALYSIS_VERSION = 1
+ANALYSIS_VERSION = 3  # 2 : ajout des tours (run_laps) ; 3 : vitesse des tours des anciennes montres
 RUN_TYPES = ("running", "trail_running", "treadmill_running", "track_running", "indoor_running")
 
 MAX_DT_S = 10           # écart entre deux points au-delà duquel on considère une pause
@@ -41,6 +42,24 @@ CREATE TABLE IF NOT EXISTS run_km (
     cadence_spm  REAL,
     power_w      REAL,
     PRIMARY KEY (activity_id, km)
+);
+CREATE TABLE IF NOT EXISTS run_laps (
+    activity_id  INTEGER NOT NULL,
+    lap          INTEGER NOT NULL,   -- 1 = premier tour
+    start_s      REAL,               -- départ du tour, en secondes depuis le début de la sortie
+    distance_m   REAL,
+    timer_s      REAL,               -- durée chronométrée (hors pauses)
+    elapsed_s    REAL,               -- durée écoulée (pauses comprises)
+    speed_ms     REAL,               -- vitesse moyenne
+    hr_avg       REAL,
+    hr_max       INTEGER,
+    ascent_m     REAL,
+    descent_m    REAL,
+    cadence_spm  REAL,
+    temp_c       REAL,
+    intensity    TEXT,               -- active, rest, warmup, cooldown, recovery, interval...
+    lap_trigger  TEXT,               -- distance, time, manual, session_end...
+    PRIMARY KEY (activity_id, lap)
 );
 CREATE TABLE IF NOT EXISTS run_fit_metrics (
     activity_id        INTEGER PRIMARY KEY,
@@ -75,12 +94,40 @@ def init_schema(db: sqlite3.Connection) -> None:
     db.executescript(SCHEMA)
 
 
-def read_points(path) -> list[Point]:
+def _lap(v: dict) -> dict:
+    cad = v.get("avg_running_cadence")
+    if cad is not None:
+        cad = 2 * (cad + (v.get("avg_fractional_cadence") or 0))  # FIT : foulées/min par jambe
+    return {
+        "start": v.get("start_time"),
+        "distance_m": v.get("total_distance"),
+        "timer_s": v.get("total_timer_time"),
+        "elapsed_s": v.get("total_elapsed_time"),
+        "speed_ms": v.get("enhanced_avg_speed") or v.get("avg_speed"),  # anciennes montres : enhanced_* vide
+        "hr_avg": v.get("avg_heart_rate"),
+        "hr_max": v.get("max_heart_rate"),
+        "ascent_m": v.get("total_ascent"),
+        "descent_m": v.get("total_descent"),
+        "cadence_spm": cad or None,
+        "temp_c": v.get("avg_temperature"),
+        "intensity": v.get("intensity"),
+        "lap_trigger": v.get("lap_trigger"),
+    }
+
+
+def read_fit(path) -> tuple[list[Point], list[dict]]:
+    """Points de mesure (`record`) et tours (`lap`) d'un fichier .fit."""
     points: list[Point] = []
+    laps: list[dict] = []
     t0 = prev = None
     with fitdecode.FitReader(str(path), check_crc=fitdecode.CrcCheck.DISABLED) as fr:
         for frame in fr:
-            if not (isinstance(frame, fitdecode.FitDataMessage) and frame.name == "record"):
+            if not isinstance(frame, fitdecode.FitDataMessage):
+                continue
+            if frame.name == "lap":
+                laps.append(_lap({f.name: f.value for f in frame.fields}))
+                continue
+            if frame.name != "record":
                 continue
             v = {f.name: f.value for f in frame.fields}
             ts = v.get("timestamp")
@@ -101,7 +148,11 @@ def read_points(path) -> list[Point]:
                 alt=v.get("enhanced_altitude", v.get("altitude")),
                 hr=v.get("heart_rate") or None, cadence=cad or None, power=v.get("power") or None,
             ))
-    return points
+    for i, lap in enumerate(laps, 1):
+        start = lap.pop("start")
+        lap["lap"] = i
+        lap["start_s"] = (start - t0).total_seconds() if start and t0 else None
+    return points, laps
 
 
 def _wavg(pairs) -> float | None:
@@ -230,7 +281,7 @@ def process(db: sqlite3.Connection) -> int:
     for i, aid in enumerate(todo, 1):
         path = FIT_DIR / f"{aid}.fit"
         try:
-            points = read_points(path)
+            points, laps = read_fit(path)
         except (OSError, fitdecode.FitError) as e:
             print(f"  {aid} : lecture impossible ({e})")
             continue
@@ -240,6 +291,13 @@ def process(db: sqlite3.Connection) -> int:
                    ascent_m, descent_m, cadence_spm, power_w) VALUES (?,?,?,?,?,?,?,?,?,?)""",
             [(aid, s["km"], s["distance_m"], s["moving_s"], s["hr_avg"], s["hr_max"],
               s["ascent_m"], s["descent_m"], s["cadence_spm"], s["power_w"]) for s in km_splits(points)],
+        )
+        lap_cols = ["lap", "start_s", "distance_m", "timer_s", "elapsed_s", "speed_ms", "hr_avg", "hr_max",
+                    "ascent_m", "descent_m", "cadence_spm", "temp_c", "intensity", "lap_trigger"]
+        db.execute("DELETE FROM run_laps WHERE activity_id=?", (aid,))
+        db.executemany(
+            f"INSERT INTO run_laps (activity_id, {', '.join(lap_cols)}) VALUES (?, {', '.join('?' * len(lap_cols))})",
+            [(aid, *[lap[c] for c in lap_cols]) for lap in laps],
         )
         m = run_metrics(points)
         db.execute(

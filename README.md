@@ -55,15 +55,18 @@ Options :
 | `activities` | une ligne par activité : type, distance, durée, FC, D+… + JSON Garmin complet |
 | `daily_health` | une ligne par jour : pas, FC repos, stress, Body Battery, sommeil, HRV, disposition à l'entraînement, charge aiguë/chronique, VO2max, poids |
 | `run_km` | une ligne par kilomètre de chaque sortie course, calculée depuis les .fit |
+| `run_laps` | une ligne par tour enregistré par la montre (auto au km, étape de séance, manuel), depuis les .fit |
 | `run_fit_metrics` | par sortie : FC et allure par moitié, découplage, FC à allure fixe |
 | `health_raw` | réponses brutes de l'API santé (par jour et par type), source de `daily_health` |
 
 ## Export pour Claude
 
 À la fin de chaque synchro, `splinter.export` régénère dans `Data/SplinterDrive` des fichiers
-compacts sur la course à pied (`LISEZMOI.md`, `courses.csv`, `courses_km.csv`,
-`semaines.csv`, `sante_quotidienne.csv`). Ce dossier est synchronisé par Google Drive pour ordinateur, ce qui
-permet d'en discuter avec Claude depuis le téléphone. Lancement seul :
+compacts sur la course à pied : `LISEZMOI.md`, `courses.csv`, `tours.csv` (tous les tours de
+l'historique), `semaines.csv`, `sante_quotidienne.csv`, et `sorties_recentes/` (un point toutes
+les 10 s pour les 10 dernières sorties, les plus anciennes sont supprimées à chaque export).
+Ce dossier est synchronisé par Google Drive pour ordinateur, ce qui permet d'en discuter avec
+Claude depuis le téléphone. Lancement seul :
 
 ```
 .\.venv\Scripts\python -m splinter.export
@@ -75,9 +78,14 @@ permet d'en discuter avec Claude depuis le téléphone. Lancement seul :
 powershell -ExecutionPolicy Bypass -File scripts\planifier_synchro.ps1 -Heure 22:00
 ```
 
-Crée une tâche Windows « Splinter - synchro Garmin » qui lance `splinter.nightly` chaque soir,
-sans fenêtre. Elle réveille le PC s'il est en veille et rattrape la synchro au prochain
-démarrage s'il était éteint. Le PC reste éveillé 3 min après la synchro pour laisser
-Google Drive envoyer l'export, puis Windows le rendort. Journal : `Data/logs/sync.log`
-(source du réveil, nouvelles sorties et nuits récupérées, dates les plus récentes exportées). Si les jetons Garmin expirent, la
-tâche échoue (voir le journal) : relancer une fois `python -m splinter.sync` à la main.
+Crée une tâche Windows « Splinter - synchro Garmin » qui lance `splinter.nightly`, sans fenêtre :
+- chaque soir à l'heure choisie, en réveillant le PC s'il est en veille ;
+- à chaque sortie de veille (si le minuteur réveille le PC en retard, Windows ne rattraperait la
+  tâche qu'après ~10 min, alors que le PC se rendort au bout de 2 min) ;
+- au prochain démarrage si le PC était éteint.
+
+La synchro est ignorée si la dernière réussie date de moins de 6 h (`-IntervalleMin`). Le PC
+reste éveillé pendant la synchro puis 3 min pour laisser Google Drive envoyer l'export.
+Journal : `Data/logs/sync.log` (source du réveil, nouvelles sorties et nuits récupérées, dates
+les plus récentes exportées). Si les jetons Garmin expirent, la tâche échoue (voir le journal) :
+relancer une fois `python -m splinter.sync` à la main.

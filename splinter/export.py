@@ -3,7 +3,8 @@
 Génère dans Data/SplinterDrive (synchronisé par Google Drive) :
 - LISEZMOI.md            profil, records, résumé récent, dictionnaire des colonnes
 - courses.csv            une ligne par sortie (route + trail)
-- courses_km.csv         une ligne par kilomètre de chaque sortie (issu des .fit)
+- tours.csv              une ligne par tour enregistré par la montre (issu des .fit), tout l'historique
+- sorties_recentes/      un fichier par sortie, un point toutes les 10 s, pour les 10 dernières sorties
 - semaines.csv           volume, intensité et forme par semaine
 - sante_quotidienne.csv  sommeil, HRV, FC repos, charge... par jour
 
@@ -17,10 +18,14 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from splinter.config import EXPORT_DIR
-from splinter.fit_analysis import FIXED_PACE_BAND
+from splinter.config import EXPORT_DIR, FIT_DIR
+from splinter.fit_analysis import FIXED_PACE_BAND, MOVING_SPEED, read_fit
 from splinter.garmin_client import open_db
 
+RECENT_RUNS = 10          # sorties détaillées dans sorties_recentes/ (rotation à chaque export)
+DETAIL_STEP_S = 10        # un point toutes les 10 s dans le détail
+RECENT_DIR = "sorties_recentes"
+OBSOLETE_FILES = ["courses_km.csv"]  # anciens fichiers d'export, supprimés du dossier
 MAX_FLAT_GAIN_PER_KM = 10  # m de D+ par km au-delà desquels le découplage n'est pas exporté
 
 RUN_TYPES = {"running": "route", "trail_running": "trail", "treadmill_running": "tapis",
@@ -125,8 +130,8 @@ def _load(db: sqlite3.Connection):
     zones_row = db.execute("SELECT raw_json FROM profile WHERE key='hr_zones'").fetchone()
     zones = json.loads(zones_row[0]) if zones_row else []
     fit_metrics = {r["activity_id"]: dict(r) for r in db.execute("SELECT * FROM run_fit_metrics")}
-    km_rows = [dict(r) for r in db.execute("SELECT * FROM run_km ORDER BY activity_id, km")]
-    return runs, health, zones, fit_metrics, km_rows
+    laps = [dict(r) for r in db.execute("SELECT * FROM run_laps ORDER BY activity_id, lap")]
+    return runs, health, zones, fit_metrics, laps
 
 
 # --- fichiers ----------------------------------------------------------------
@@ -137,7 +142,7 @@ _BAND_TXT = "{}:{:02d}-{}:{:02d}".format(FIXED_PACE_BAND[0] // 60, FIXED_PACE_BA
                                        FIXED_PACE_BAND[1] // 60, FIXED_PACE_BAND[1] % 60)
 
 COURSES_COLUMNS = [
-    ("id", "identifiant Garmin de la sortie (clé de jointure avec courses_km.csv)"),
+    ("id", "identifiant Garmin de la sortie (clé de jointure avec tours.csv et sorties_recentes/)"),
     ("date", "date locale de départ (AAAA-MM-JJ)"),
     ("heure", "heure locale de départ"),
     ("type", "route, trail, tapis, piste"),
@@ -242,41 +247,108 @@ def _course_row(start_time: str, a: dict, health: dict, fm: dict) -> list:
     ]
 
 
-KM_COLUMNS = [
+LAP_KINDS = {"active": "course", "interval": "course", "rest": "récupération", "recovery": "récupération",
+             "warmup": "échauffement", "cooldown": "retour au calme"}
+LAP_TRIGGERS = {"distance": "distance", "time": "temps", "manual": "manuel", "session_end": "fin de séance"}
+
+TOURS_COLUMNS = [
     ("id", "identifiant de la sortie (voir courses.csv)"),
     ("date", "date de la sortie"),
-    ("type", "route, trail..."),
-    ("km", "numéro du kilomètre (1 = premier)"),
-    ("distance_m", "1000, sauf le dernier kilomètre partiel"),
-    ("temps", "temps en mouvement sur ce kilomètre m:ss"),
-    ("allure", "allure en mouvement, min:s par km"),
+    ("tour", "numéro du tour dans la sortie (1 = premier)"),
+    ("debut", "départ du tour depuis le début de la sortie, h:mm:ss"),
+    ("nature", "nature du tour selon la montre : course, récupération, échauffement, retour au calme "
+               "(dans une séance structurée, les répétitions sont « course » et les récupérations « récupération »)"),
+    ("declencheur", "ce qui a fermé le tour : distance (tour auto, en général chaque km), temps (étape de séance "
+                    "ou tour auto au temps), manuel (bouton), fin de séance (dernier tour)"),
+    ("distance_m", "distance du tour"),
+    ("duree", "durée chronométrée du tour (pauses exclues), h:mm:ss"),
+    ("allure", "allure moyenne, min:s par km (vide si le tour est à l'arrêt)"),
     ("fc_moy", "FC moyenne"),
     ("fc_max", "FC max"),
-    ("d_plus_m", "dénivelé positif sur ce kilomètre"),
+    ("d_plus_m", "dénivelé positif"),
     ("d_moins_m", "dénivelé négatif"),
+    ("cadence", "cadence moyenne (pas/min)"),
+    ("temp_c", "température moyenne (capteur de la montre, au poignet ; absente sur certaines montres)"),
+]
+
+
+def _tour_rows(laps, runs) -> list[list]:
+    dates = {a["activityId"]: t[:10] for t, a in runs}
+    rows = []
+    for lap in laps:
+        if lap["activity_id"] not in dates:
+            continue
+        speed = lap["speed_ms"] or (lap["distance_m"] / lap["timer_s"] if lap["distance_m"] and lap["timer_s"] else None)
+        rows.append([
+            lap["activity_id"], dates[lap["activity_id"]], lap["lap"], _hms(lap["start_s"]),
+            LAP_KINDS.get(lap["intensity"], lap["intensity"] or ""),
+            LAP_TRIGGERS.get(lap["lap_trigger"], lap["lap_trigger"] or ""),
+            _r(lap["distance_m"], 0), _hms(lap["timer_s"]),
+            _pace(speed) if speed and speed >= MOVING_SPEED else "",
+            _r(lap["hr_avg"], 0), lap["hr_max"] or "",
+            _r(lap["ascent_m"], 0), _r(lap["descent_m"], 0),
+            _r(lap["cadence_spm"], 0), _r(lap["temp_c"], 0),
+        ])
+    return rows
+
+
+DETAIL_COLUMNS = [
+    ("temps", "temps écoulé depuis le départ, h:mm:ss (début de la fenêtre de 10 s ; un saut = pause)"),
+    ("distance_km", "distance cumulée en fin de fenêtre"),
+    ("allure", "allure moyenne sur la fenêtre, min:s par km (vide à l'arrêt)"),
+    ("fc", "FC moyenne sur la fenêtre"),
+    ("altitude_m", "altitude en fin de fenêtre"),
     ("cadence", "cadence moyenne (pas/min)"),
     ("puissance", "puissance moyenne (W)"),
 ]
 
 
-def _km_rows(km_rows, runs) -> list[list]:
-    info = {a["activityId"]: (t[:10], RUN_TYPES.get((a.get("activityType") or {}).get("typeKey"), ""))
-            for t, a in runs}
+def _detail_rows(points) -> list[list]:
+    """Moyennes par fenêtres de DETAIL_STEP_S secondes (les fenêtres sans point sont des pauses)."""
+    windows: dict[int, list] = defaultdict(list)
+    for p in points:
+        windows[int(p.t // DETAIL_STEP_S)].append(p)
+
+    def mean(values):
+        values = [v for v in values if v is not None]
+        return sum(values) / len(values) if values else None
+
     rows = []
-    for k in km_rows:
-        if k["activity_id"] not in info:
-            continue
-        d, typ = info[k["activity_id"]]
-        moving, dist = k["moving_s"], k["distance_m"]
+    for w in sorted(windows):
+        pts = windows[w]
+        last = pts[-1]
+        speed = mean([p.speed for p in pts])
         rows.append([
-            k["activity_id"], d, typ, k["km"], _r(dist, 0),
-            f"{int(moving // 60)}:{int(moving % 60):02d}" if moving else "",
-            _pace(dist / moving) if moving else "",
-            _r(k["hr_avg"], 0), k["hr_max"] or "",
-            _r(k["ascent_m"], 0), _r(k["descent_m"], 0),
-            _r(k["cadence_spm"], 0), _r(k["power_w"], 0),
+            _hms(w * DETAIL_STEP_S),
+            _r(last.dist / 1000, 3) if last.dist is not None else "",
+            _pace(speed) if speed and speed >= MOVING_SPEED else "",
+            _r(mean([p.hr for p in pts]), 0),
+            _r(last.alt, 0),
+            _r(mean([p.cadence for p in pts]), 0),
+            _r(mean([p.power for p in pts]), 0),
         ])
     return rows
+
+
+def _export_recent(out_dir: Path, runs) -> list[str]:
+    """Détail des RECENT_RUNS dernières sorties ; supprime les fichiers des sorties plus anciennes."""
+    folder = out_dir / RECENT_DIR
+    folder.mkdir(exist_ok=True)
+    kept = []
+    for t, a in reversed(runs):
+        if len(kept) == RECENT_RUNS:
+            break
+        path = FIT_DIR / f"{a['activityId']}.fit"
+        if not path.exists():
+            continue
+        name = f"{t[:10]}_{RUN_TYPES.get(a['activityType']['typeKey'], 'course')}_{a['activityId']}.csv"
+        points, _ = read_fit(path)
+        _write_csv(folder / name, [c for c, _ in DETAIL_COLUMNS], _detail_rows(points))
+        kept.append(name)
+    for old in folder.glob("*.csv"):
+        if old.name not in kept:
+            old.unlink()
+    return kept
 
 
 SEMAINES_COLUMNS = [
@@ -435,7 +507,7 @@ def _last_value(health, col, days=30):
     return round(sum(vals) / len(vals), 1) if vals else None
 
 
-def _lisezmoi(runs, health, zones, semaines) -> str:
+def _lisezmoi(runs, health, zones, semaines, n_laps: int, recent: list[str]) -> str:
     today = datetime.now().strftime("%Y-%m-%d %H:%M")
     first, last = runs[0][0][:10], runs[-1][0][:10]
     vo2 = next((h["vo2max"] for d, h in reversed(health.items()) if h["vo2max"]), None)
@@ -487,10 +559,20 @@ Les données couvrent du {first} au {last}.
 
 Fichiers :
 - `courses.csv` : une ligne par sortie ({len(runs)} sorties)
-- `courses_km.csv` : une ligne par kilomètre de chaque sortie, calculée à partir des
-  enregistrements seconde par seconde (évolution de l'allure et de la FC pendant la sortie)
+- `tours.csv` : une ligne par tour enregistré par la montre, pour toutes les sorties ({n_laps} tours) :
+  tours automatiques (en général chaque km), étapes des séances structurées (répétitions et
+  récupérations), tours manuels. Sert à suivre l'allure et la FC au fil d'une sortie et à lire
+  les fractionnés.
+- `sorties_recentes/` : le détail des {len(recent)} dernières sorties, un fichier par sortie
+  nommé `AAAA-MM-JJ_type_id.csv`, avec un point toutes les {DETAIL_STEP_S} secondes. Les plus
+  anciennes sont retirées automatiquement à chaque mise à jour. Fichiers présents :
+{chr(10).join(f"  - `{name}`" for name in recent)}
 - `semaines.csv` : agrégats hebdomadaires (semaines du lundi au dimanche)
 - `sante_quotidienne.csv` : une ligne par jour (sommeil, HRV, FC repos, charge...)
+
+Organisation : `courses.csv` est la table centrale (une sortie = un `id`). `tours.csv` et les
+fichiers de `sorties_recentes/` détaillent une sortie (même `id`, présent aussi dans le nom du
+fichier). `semaines.csv` agrège `courses.csv` et `sante_quotidienne.csv` par semaine.
 
 ## Profil
 
@@ -542,9 +624,13 @@ Fichiers :
 
 {coldoc(COURSES_COLUMNS)}
 
-## Colonnes de courses_km.csv
+## Colonnes de tours.csv
 
-{coldoc(KM_COLUMNS)}
+{coldoc(TOURS_COLUMNS)}
+
+## Colonnes des fichiers de sorties_recentes/
+
+{coldoc(DETAIL_COLUMNS)}
 
 ## Colonnes de semaines.csv
 
@@ -559,7 +645,7 @@ Fichiers :
 def export(out_dir: Path = EXPORT_DIR) -> None:
     db = open_db()
     try:
-        runs, health, zones, fit_metrics, km_rows = _load(db)
+        runs, health, zones, fit_metrics, laps = _load(db)
     finally:
         db.close()
     if not runs:
@@ -569,11 +655,15 @@ def export(out_dir: Path = EXPORT_DIR) -> None:
 
     _write_csv(out_dir / "courses.csv", [c for c, _ in COURSES_COLUMNS],
                [_course_row(t, a, health, fit_metrics.get(a["activityId"], {})) for t, a in runs])
-    _write_csv(out_dir / "courses_km.csv", [c for c, _ in KM_COLUMNS], _km_rows(km_rows, runs))
+    tours = _tour_rows(laps, runs)
+    _write_csv(out_dir / "tours.csv", [c for c, _ in TOURS_COLUMNS], tours)
+    recent = _export_recent(out_dir, runs)
+    for name in OBSOLETE_FILES:
+        (out_dir / name).unlink(missing_ok=True)
     semaines = _semaines(runs, health)
     _write_csv(out_dir / "semaines.csv", [c for c, _ in SEMAINES_COLUMNS], semaines)
     _write_csv(out_dir / "sante_quotidienne.csv", [c for c, _ in SANTE_COLUMNS], _sante(health))
-    (out_dir / "LISEZMOI.md").write_text(_lisezmoi(runs, health, zones, semaines), encoding="utf-8")
+    (out_dir / "LISEZMOI.md").write_text(_lisezmoi(runs, health, zones, semaines, len(tours), recent), encoding="utf-8")
     print(f"Export Claude : {out_dir} ({len(runs)} sorties, {len(semaines)} semaines, {len(health)} jours)")
     print(f"  dernière sortie : {runs[-1][0][:16]} ; dernier jour santé : {max(health) if health else '-'}")
 
