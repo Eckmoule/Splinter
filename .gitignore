@@ -9,3 +9,10 @@ data/
 *.db
 *.fit
 .env
+
+# Configuration locale Claude Code
+.claude/
+
+# Interface web : dépendances et build générés
+web/node_modules/
+web/dist/

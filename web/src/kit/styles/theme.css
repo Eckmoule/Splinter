@@ -1,0 +1,82 @@
+/*
+ * Thème du kit : jetons de couleur (clair / sombre) + briques de mise en page.
+ * À importer une fois à la racine de l'application (ex. dans main.js : import './styles/theme.css').
+ * Les graphiques (ChartBox.vue) lisent ces mêmes variables : tout suit le thème.
+ */
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; /* fond de page */
+  --surface: #fcfcfb; /* fond des cartes et des graphiques */
+  --ink: #0b0b0b; /* texte principal */
+  --ink-2: #52514e; /* texte secondaire */
+  --ink-muted: #898781; /* axes, mentions */
+  --grid: #e1e0d9; /* quadrillage, séparateurs */
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.1);
+  --good: #006300; /* hausse */
+  --bad: #d03b3b; /* baisse, erreur */
+  --warn: #b86e00; /* attention */
+  --accent: #2a78d6; /* liens, barres simples */
+  /* séries de données : palette « Pastel », validée (contraste, daltonisme) dans cet ordre */
+  --s1: #688ad5; /* bleu lavande */
+  --s2: #e89960; /* pêche */
+  --s3: #9e6ec0; /* mauve */
+  --s4: #4dbc92; /* menthe */
+}
+/* mode sombre : valeurs choisies pour le fond sombre (pas une simple inversion) */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.1);
+    --good: #0ca30c;
+    --warn: #e0a030;
+    --accent: #3987e5;
+    --s1: #5d7dc8;
+    --s2: #ca7d44;
+    --s3: #9262b3;
+    --s4: #40a47e;
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  line-height: 1.4;
+}
+button, select { font: inherit; color: inherit; }
+
+/* Briques de mise en page */
+.page { max-width: 1180px; margin: 0 auto; padding: 8px 16px 48px; display: flex; flex-direction: column; gap: 16px; }
+.page-title { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.page-title h2 { margin: 0; font-size: 20px; }
+.page-title span, .muted, .foot { color: var(--ink-2); font-size: 13px; }
+.foot { margin: 4px 0 0; }
+.error { color: var(--bad); }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; } /* rangée d'indicateurs */
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 16px; } /* 2 colonnes, 1 sur mobile */
+.legend { display: flex; gap: 14px; flex-wrap: wrap; list-style: none; padding: 0; margin: 0 0 4px; font-size: 13px; color: var(--ink-2); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
+select { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; }
+.link { background: none; border: 0; color: var(--accent); cursor: pointer; font-size: 13px; }
+.table-wrap { overflow-x: auto; } /* les tableaux défilent dans leur carte sur mobile */
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { font-weight: 600; color: var(--ink-2); font-size: 13px; }
+.num { text-align: right; font-variant-numeric: tabular-nums; } /* chiffres alignés */
+.up { color: var(--good); }
+.down { color: var(--bad); }
+
+/* Optionnel — mode « données anonymisées » (lib/privacy.js) : contenu des champs numériques masqué */
+.privacy input[inputmode='decimal'] { -webkit-text-security: disc; text-security: disc; }
+@supports not (-webkit-text-security: disc) {
+  .privacy input[inputmode='decimal'] { filter: blur(6px); }
+}

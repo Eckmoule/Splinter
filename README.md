@@ -7,6 +7,7 @@ Analyse locale de l'historique sportif Garmin Connect.
 ```
 Sport/
 ├── Splinter/          # ce dépôt git (code uniquement)
+│   ├── web/                  # interface du dashboard (Vue 3 + Vite + ECharts, kit UI Fafnir)
 │   └── splinter/
 │       ├── config.py         # chemins du projet
 │       ├── garmin_client.py  # connexion Garmin Connect + base locale
@@ -14,6 +15,8 @@ Sport/
 │       ├── health.py         # synchro des données santé quotidiennes
 │       ├── fit_analysis.py   # analyse seconde par seconde des .fit (km, dérive)
 │       ├── export.py         # export course à pied lisible par Claude
+│       ├── api/              # API locale FastAPI du dashboard (lit garmin.db)
+│       ├── dashboard.py      # lance le dashboard (compile web/ au besoin)
 │       └── sync.py           # point d'entrée de la synchro
 └── Data/              # données et infos sensibles, hors git
     ├── garmin.db          # base SQLite (activités + santé)
@@ -56,7 +59,7 @@ Options :
 | `daily_health` | une ligne par jour : pas, FC repos, stress, Body Battery, sommeil, HRV, disposition à l'entraînement, charge aiguë/chronique, VO2max, poids |
 | `run_km` | une ligne par kilomètre de chaque sortie course, calculée depuis les .fit |
 | `run_laps` | une ligne par tour enregistré par la montre (auto au km, étape de séance, manuel), depuis les .fit |
-| `run_fit_metrics` | par sortie : FC et allure par moitié, découplage, FC à allure fixe |
+| `run_fit_metrics` | par sortie : FC et allure par moitié, découplage, FC à allure fixe, efficacité, charge TRIMP |
 | `health_raw` | réponses brutes de l'API santé (par jour et par type), source de `daily_health` |
 
 ## Export pour Claude
@@ -71,6 +74,30 @@ Claude depuis le téléphone. Lancement seul :
 ```
 .\.venv\Scripts\python -m splinter.export
 ```
+
+## Dashboard
+
+```
+.\.venv\Scripts\python -m splinter.dashboard
+```
+
+Ouvre http://localhost:8050 (accessible uniquement depuis ce PC). Au premier lancement, ou quand
+les sources de `web/` ont changé, l'interface est compilée automatiquement (Node.js requis).
+
+- `splinter/api/` : API FastAPI en lecture seule sur `garmin.db`, sert aussi l'interface compilée.
+- `web/` : interface Vue 3 + Vite + ECharts, sur la base du kit UI « Fafnir » (`web/src/kit/` :
+  thème, composants, formats français, graphiques).
+- Développement de l'interface avec rechargement à chaud : lancer le dashboard avec
+  `--no-browser`, puis `npm run dev` dans `web/` (http://localhost:5173).
+
+Pages (indicateurs calculés dans `splinter/api/metrics.py`) :
+- **Progression** — est-ce que je progresse sur le long terme ? FC sur le plat à allure fixe,
+  efficacité (vitesse ÷ FC), VO2max ; en contexte : découplage des sorties longues, FC repos et HRV
+  mensuelles, volume et plus longue sortie par mois. Tuiles : 3 derniers mois vs même période un an avant.
+- **Entraînement** — est-ce que je m'entraîne correctement ? Résumé par règles explicites (charge,
+  HRV, FC repos, sommeil, intensité) ; Forme / Fatigue / Fraîcheur calculées depuis une charge TRIMP
+  (FC seconde par seconde) sur tout l'historique ; récupération sur 90 jours ; sur 3, 6 ou 12 mois :
+  répartition de l'intensité, régularité, montée en charge, types de séances.
 
 ## Synchro automatique chaque soir
 

@@ -3,11 +3,14 @@
 Pour chaque sortie (route, trail...) dont le .fit est disponible, calcule et met en cache :
 - `run_km`          : une ligne par kilomètre (allure, FC, D+/D-, cadence, puissance)
 - `run_laps`        : une ligne par tour enregistré par la montre (auto au km, fraction de séance, manuel)
-- `run_fit_metrics` : indicateurs de la sortie (dérive cardiaque, découplage, FC à allure fixe)
+- `run_fit_metrics` : indicateurs de la sortie (dérive cardiaque, découplage, FC à allure fixe,
+                      efficacité vitesse/FC sur le plat, charge TRIMP)
 
 Les résultats sont versionnés : si ANALYSIS_VERSION change, tout est recalculé.
 """
 
+import json
+import math
 import sqlite3
 from dataclasses import dataclass
 
@@ -15,7 +18,7 @@ import fitdecode
 
 from splinter.config import FIT_DIR
 
-ANALYSIS_VERSION = 3  # 2 : ajout des tours (run_laps) ; 3 : vitesse des tours des anciennes montres
+ANALYSIS_VERSION = 4  # 2 : tours (run_laps) ; 3 : vitesse des tours anciennes montres ; 4 : TRIMP, efficacité
 RUN_TYPES = ("running", "trail_running", "treadmill_running", "track_running", "indoor_running")
 
 MAX_DT_S = 10           # écart entre deux points au-delà duquel on considère une pause
@@ -28,6 +31,9 @@ FIXED_PACE_BAND = (6 * 60, 6 * 60 + 30)  # allure de référence en s/km : 6:00-
 FLAT_GRADE = 0.02       # |pente| max pour la FC à allure fixe
 GRADE_WINDOW = 10       # points pour estimer la pente
 MIN_BAND_S = 5 * 60     # temps minimal dans la bande d'allure pour donner une valeur
+MIN_EF_S = 10 * 60      # temps minimal sur le plat pour calculer l'efficacité
+DEFAULT_HR_REST = 50    # FC repos / max par défaut si inconnues (TRIMP)
+DEFAULT_HR_MAX = 190
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS run_km (
@@ -73,7 +79,10 @@ CREATE TABLE IF NOT EXISTS run_fit_metrics (
     decoupling_pct     REAL,   -- découplage allure/FC (Pa:HR)
     power_decoupling_pct REAL, -- découplage puissance/FC (Pw:HR)
     hr_fixed_pace      REAL,   -- FC moyenne sur le plat à allure FIXED_PACE_BAND
-    fixed_pace_s       REAL    -- temps passé dans cette bande
+    fixed_pace_s       REAL,   -- temps passé dans cette bande
+    ef_flat            REAL,   -- efficacité : vitesse (m/min) / FC sur le plat, hors échauffement
+    ef_flat_s          REAL,   -- temps pris en compte pour l'efficacité
+    trimp              REAL    -- charge TRIMP de Banister calculée seconde par seconde
 );
 """
 
@@ -92,6 +101,18 @@ class Point:
 
 def init_schema(db: sqlite3.Connection) -> None:
     db.executescript(SCHEMA)
+    # bases créées avant l'ajout de colonnes
+    have = {r[1] for r in db.execute("PRAGMA table_info(run_fit_metrics)")}
+    for col in ("ef_flat", "ef_flat_s", "trimp"):
+        if col not in have:
+            db.execute(f"ALTER TABLE run_fit_metrics ADD COLUMN {col} REAL")
+
+
+def trimp_rate(hr: float, hr_rest: float, hr_max: float) -> float:
+    """Charge TRIMP de Banister par minute à une FC donnée (pondération masculine 0,64·e^(1,92·x))."""
+    x = (hr - hr_rest) / (hr_max - hr_rest)
+    x = min(max(x, 0.0), 1.0)
+    return x * 0.64 * math.exp(1.92 * x)
 
 
 def _lap(v: dict) -> dict:
@@ -216,8 +237,19 @@ def _decoupling(first: float | None, second: float | None, hr1: float | None, hr
     return 100 * (ef1 - ef2) / ef1
 
 
-def run_metrics(points: list[Point]) -> dict:
+def _flat(points: list[Point], i: int) -> bool:
+    """Le point i est-il sur le plat (pente estimée sur GRADE_WINDOW points) ?"""
+    p, q = points[i], points[max(0, i - GRADE_WINDOW)]
+    if p.alt is None or q.alt is None or p.dist is None or q.dist is None or p.dist - q.dist < 5:
+        return False
+    return abs((p.alt - q.alt) / (p.dist - q.dist)) <= FLAT_GRADE
+
+
+def run_metrics(points: list[Point], hr_rest: float = DEFAULT_HR_REST, hr_max: float = DEFAULT_HR_MAX) -> dict:
     m: dict = {}
+    # --- charge TRIMP : minutes en mouvement pondérées par l'intensité cardiaque
+    m["trimp"] = sum(p.dt / 60 * trimp_rate(p.hr, hr_rest, hr_max) for p in points if p.hr and p.dt) or None
+
     # --- dérive : on coupe le temps en mouvement (hors échauffement) en deux moitiés
     moving, acc = [], 0.0
     for p in points:
@@ -239,25 +271,43 @@ def run_metrics(points: list[Point]) -> dict:
                                                 m["hr_first_half"], m["hr_second_half"])
 
     # --- FC moyenne sur le plat dans la bande d'allure de référence
+    # --- sur le plat, hors échauffement : FC à allure de référence et efficacité vitesse/FC
     lo, hi = FIXED_PACE_BAND
-    band = []
+    band, flat = [], []
     acc = 0.0
     for i, p in enumerate(points):
         acc += p.dt
-        if acc <= WARMUP_S or not (p.dt and p.speed and p.hr):
+        if acc <= WARMUP_S or not (p.dt and p.speed and p.hr) or not _flat(points, i):
             continue
-        pace = 1000 / p.speed
-        j = max(0, i - GRADE_WINDOW)
-        q = points[j]
-        if p.alt is None or q.alt is None or p.dist is None or q.dist is None or p.dist - q.dist < 5:
-            continue
-        grade = (p.alt - q.alt) / (p.dist - q.dist)
-        if lo <= pace <= hi and abs(grade) <= FLAT_GRADE:
+        flat.append(p)
+        if lo <= 1000 / p.speed <= hi:
             band.append(p)
     band_s = sum(p.dt for p in band)
     m["fixed_pace_s"] = band_s
     m["hr_fixed_pace"] = _wavg([(p.hr, p.dt) for p in band]) if band_s >= MIN_BAND_S else None
+    flat_s = sum(p.dt for p in flat)
+    m["ef_flat_s"] = flat_s
+    if flat_s >= MIN_EF_S:
+        m["ef_flat"] = _wavg([(p.speed * 60, p.dt) for p in flat]) / _wavg([(p.hr, p.dt) for p in flat])
     return m
+
+
+def heart_rate_refs(db: sqlite3.Connection) -> tuple[float, dict[str, float], float]:
+    """FC max (zones Garmin), FC repos par jour et FC repos médiane, pour le calcul du TRIMP."""
+    hr_max = DEFAULT_HR_MAX
+    row = db.execute("SELECT raw_json FROM profile WHERE key='hr_zones'").fetchone() \
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='profile'").fetchone() else None
+    if row and row[0]:
+        zones = json.loads(row[0])
+        hr_max = next((z.get("maxHeartRateUsed") for z in zones if z.get("maxHeartRateUsed")), hr_max)
+    rest = {}
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='daily_health'").fetchone():
+        rest = dict(db.execute("SELECT date, rhr FROM daily_health WHERE rhr IS NOT NULL"))
+    values = sorted(rest.values())
+    median = values[len(values) // 2] if values else DEFAULT_HR_REST
+    # FC repos aberrantes (jours sans montre) : on retombe sur la médiane
+    rest = {d: v for d, v in rest.items() if v <= 1.5 * median}
+    return hr_max, rest, median
 
 
 def process(db: sqlite3.Connection) -> int:
@@ -277,7 +327,9 @@ def process(db: sqlite3.Connection) -> int:
     print(f"Analyse des fichiers .fit : {len(todo)} sorties ...")
     cols = ["hr_first_half", "hr_second_half", "speed_first_half", "speed_second_half",
             "power_first_half", "power_second_half", "decoupling_pct", "power_decoupling_pct",
-            "hr_fixed_pace", "fixed_pace_s"]
+            "hr_fixed_pace", "fixed_pace_s", "ef_flat", "ef_flat_s", "trimp"]
+    hr_max, rest_by_day, rest_default = heart_rate_refs(db)
+    start_of = dict(db.execute("SELECT activity_id, substr(start_time, 1, 10) FROM activities"))
     for i, aid in enumerate(todo, 1):
         path = FIT_DIR / f"{aid}.fit"
         try:
@@ -299,7 +351,7 @@ def process(db: sqlite3.Connection) -> int:
             f"INSERT INTO run_laps (activity_id, {', '.join(lap_cols)}) VALUES (?, {', '.join('?' * len(lap_cols))})",
             [(aid, *[lap[c] for c in lap_cols]) for lap in laps],
         )
-        m = run_metrics(points)
+        m = run_metrics(points, rest_by_day.get(start_of.get(aid), rest_default), hr_max)
         db.execute(
             f"INSERT OR REPLACE INTO run_fit_metrics (activity_id, version, {', '.join(cols)}) "
             f"VALUES (?, ?, {', '.join('?' * len(cols))})",
