@@ -26,11 +26,7 @@ import time
 import traceback
 from datetime import datetime
 
-from splinter.config import DATA_DIR
-
-LOG_DIR = DATA_DIR / "logs"
-LOG_FILE = LOG_DIR / "sync.log"
-LAST_OK_FILE = LOG_DIR / "derniere_synchro_ok.txt"
+from splinter.sync_state import LOG_DIR, LOG_FILE, hours_since_last_ok
 MAX_LOG_BYTES = 1_000_000
 KEEP_AWAKE_AFTER_S = 3 * 60
 NETWORK_HOST = ("connect.garmin.com", 443)
@@ -62,14 +58,6 @@ def _last_wake() -> str:
         return " | ".join(lines[-3:]) or "aucun détail"
 
 
-def _hours_since_last_ok() -> float | None:
-    try:
-        last = datetime.fromisoformat(LAST_OK_FILE.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return None
-    return (datetime.now() - last).total_seconds() / 3600
-
-
 def _wait_for_network() -> bool:
     deadline = time.monotonic() + NETWORK_WAIT_S
     while True:
@@ -98,7 +86,7 @@ def main() -> int:
         sys.stdout = sys.stderr = log
         sys.stdin = None  # aucune saisie possible en mode planifié
 
-        age = _hours_since_last_ok()
+        age = hours_since_last_ok()
         if args.if_older_than is not None and age is not None and age < args.if_older_than:
             print(f"{datetime.now():%Y-%m-%d %H:%M:%S} — déclenchement ignoré : "
                   f"dernière synchro réussie il y a {age:.1f} h")
@@ -115,8 +103,7 @@ def main() -> int:
             else:
                 sys.argv = ["splinter.sync"]
                 from splinter import sync
-                sync.main()
-                LAST_OK_FILE.write_text(datetime.now().isoformat(timespec="seconds"), encoding="utf-8")
+                sync.main()  # verrou et résultat gérés par splinter.sync_state
                 code = 0
         except SystemExit as e:
             print(f"Arrêt : {e}")

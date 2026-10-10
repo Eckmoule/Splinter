@@ -15,10 +15,9 @@ import statistics
 from collections import defaultdict
 from datetime import date, timedelta
 
-from splinter.export import MAX_FLAT_GAIN_PER_KM, RUN_TYPES
+from splinter.export import RUN_TYPES, terrain
 from splinter.fit_analysis import heart_rate_refs, trimp_rate
 
-ROAD = "running"
 TREND_DAYS = 42          # fenêtre glissante des tendances (6 semaines)
 LONG_RUN_S = 60 * 60     # sortie longue pour le découplage
 LONG_RUN_WEEK_S = 75 * 60  # sortie longue pour la variété des séances
@@ -65,11 +64,6 @@ def _rolling(points: list[tuple[str, float]], days: int = TREND_DAYS, stat=stati
     return out
 
 
-def _mean(values):
-    values = [v for v in values if v is not None]
-    return statistics.fmean(values) if values else None
-
-
 def _runs(db) -> list[dict]:
     placeholders = ",".join("?" * len(RUN_TYPES))
     rows = db.execute(
@@ -85,7 +79,7 @@ def _runs(db) -> list[dict]:
     for r in rows:
         raw = json.loads(r["raw_json"])
         runs.append({
-            "id": r["activity_id"], "date": r["start_time"][:10], "type": r["type_key"], "name": r["name"],
+            "id": r["activity_id"], "date": r["start_time"][:10], "name": r["name"],
             "km": (r["distance_m"] or 0) / 1000, "moving_s": r["moving_s"] or 0, "d_plus": r["elevation_gain"] or 0,
             "avg_hr": r["avg_hr"], "vo2max": raw.get("vO2MaxValue"), "effect": raw.get("trainingEffectLabel"),
             "zones_s": [raw.get(f"hrTimeInZone_{z}") or 0 for z in range(1, 6)],
@@ -115,10 +109,6 @@ def _monthly(health: dict, key: str) -> list:
     return [[f"{m}-15", round(statistics.fmean(v), 1)] for m, v in sorted(acc.items()) if len(v) >= 10]
 
 
-def _avg_between(points: list, start: str, end: str):
-    return _mean([v for d, v in points if start <= d <= end])
-
-
 # --- Progression -------------------------------------------------------------------------------
 
 def progression(db_path) -> dict:
@@ -126,20 +116,24 @@ def progression(db_path) -> dict:
         runs = _runs(db)
         health = _health(db)
     today = date.today()
-    road = [r for r in runs if r["type"] == ROAD]
-
-    fixed = [(r["date"], round(r["hr_fixed_pace"], 1)) for r in road if r["hr_fixed_pace"]]
-    ef = [(r["date"], round(r["ef"], 3)) for r in road
+    # FC à allure fixe et efficacité : toutes les sorties, la sélection des portions comparables (plat,
+    # 5e-60e minute, pas juste après une montée) est faite dans fit_analysis. Le type Garmin (course /
+    # trail) n'est pas utilisé : il ne reflète que l'appli lancée sur la montre.
+    fixed = [(r["date"], round(r["hr_fixed_pace"], 1)) for r in runs if r["hr_fixed_pace"]]
+    ef = [(r["date"], round(r["ef"], 3)) for r in runs
           if r["ef"] and not r["structured"] and r["moving_s"] >= 30 * 60]
     # VO2max quotidienne (montres récentes) dès qu'elle existe ; avant, valeur par sortie. Pas de
     # mélange ensuite : une ancienne montre ressortie ponctuellement estime une VO2max différente.
-    vo2_daily = {d: h["vo2max"] for d, h in health.items() if h["vo2max"]}
+    # Les jours sans données de sommeil, la montre principale n'est pas portée : Garmin recalcule alors
+    # la VO2max depuis une autre montre, avec des valeurs incohérentes : elles sont écartées.
+    vo2_daily = {d: h["vo2max"] for d, h in health.items() if h["vo2max"] and h["sleep_s"]}
     daily_from = min(vo2_daily) if vo2_daily else "9999"
     vo2_runs = {r["date"]: r["vo2max"] for r in runs if r["vo2max"] and r["date"] < daily_from}
     vo2 = sorted({**vo2_runs, **vo2_daily}.items())
-    long_runs = [(r["date"], round(r["decoupling"], 1)) for r in road
-                 if r["decoupling"] is not None and r["moving_s"] >= LONG_RUN_S and r["km"]
-                 and r["d_plus"] / r["km"] <= MAX_FLAT_GAIN_PER_KM]
+    # découplage : compare les deux moitiés de toute la sortie, donc seulement sur terrain plat (D+/km)
+    flat = [r for r in runs if terrain(r["d_plus"], r["km"]) == "plat"]
+    long_runs = [(r["date"], round(r["decoupling"], 1)) for r in flat
+                 if r["decoupling"] is not None and r["moving_s"] >= LONG_RUN_S]
 
     months = defaultdict(lambda: {"km": 0.0, "d_plus": 0.0, "longest": 0.0})
     for r in runs:
@@ -149,23 +143,23 @@ def progression(db_path) -> dict:
         m["longest"] = max(m["longest"], r["km"])
     month_keys = sorted(months)
 
-    # tuiles : 3 derniers mois comparés aux 3 mêmes mois un an plus tôt (même saison)
-    end = today.isoformat()
-    start = (today - timedelta(days=91)).isoformat()
-    y_end = (today - timedelta(days=365)).isoformat()
-    y_start = (today - timedelta(days=365 + 91)).isoformat()
-
-    def tile(points):
-        now, before = _avg_between(points, start, end), _avg_between(points, y_start, y_end)
-        return {"now": now, "year_ago": before}
+    # tuiles : même calcul que la fin des courbes (fenêtre glissante jusqu'à aujourd'hui), comparé à
+    # la même fenêtre un an plus tôt (même saison, donc même effet de la chaleur)
+    def tile(points, days, stat):
+        def window(end: date):
+            lo, hi = (end - timedelta(days=days)).isoformat(), end.isoformat()
+            values = [v for d, v in points if lo < d <= hi]
+            return stat(values) if values else None
+        return {"now": window(today), "year_ago": window(today - timedelta(days=365)), "days": days}
 
     rhr_points = [(d, h["rhr"]) for d, h in health.items() if h["rhr"]]
-    hrv_points = [(d, h["hrv_night"]) for d, h in health.items() if h["hrv_night"]]
     return {
         "tiles": {
-            "hr_fixed_pace": tile(fixed), "ef": tile(ef), "rhr": tile(rhr_points),
+            "hr_fixed_pace": tile(fixed, TREND_DAYS, statistics.median),
+            "ef": tile(ef, TREND_DAYS, statistics.fmean),
+            "rhr": tile(rhr_points, 30, statistics.fmean),
             "vo2max": {"now": vo2[-1][1] if vo2 else None,
-                       "year_ago": next((v for d, v in reversed(vo2) if d <= y_end), None)},
+                       "year_ago": next((v for d, v in reversed(vo2) if d <= (today - timedelta(days=365)).isoformat()), None)},
         },
         "hr_fixed_pace": {"points": fixed, "trend": _rolling(fixed, stat=statistics.median)},
         "ef": {"points": ef, "trend": _rolling(ef)},

@@ -18,7 +18,7 @@ import fitdecode
 
 from splinter.config import FIT_DIR
 
-ANALYSIS_VERSION = 4  # 2 : tours (run_laps) ; 3 : vitesse des tours anciennes montres ; 4 : TRIMP, efficacité
+ANALYSIS_VERSION = 5  # 2 : tours ; 3 : vitesse tours anciennes montres ; 4 : TRIMP, efficacité ; 5 : portions « fraîches »
 RUN_TYPES = ("running", "trail_running", "treadmill_running", "track_running", "indoor_running")
 
 MAX_DT_S = 10           # écart entre deux points au-delà duquel on considère une pause
@@ -32,6 +32,9 @@ FLAT_GRADE = 0.02       # |pente| max pour la FC à allure fixe
 GRADE_WINDOW = 10       # points pour estimer la pente
 MIN_BAND_S = 5 * 60     # temps minimal dans la bande d'allure pour donner une valeur
 MIN_EF_S = 10 * 60      # temps minimal sur le plat pour calculer l'efficacité
+FRESH_MAX_S = 60 * 60   # FC à allure fixe et efficacité : portions courues avant la 60e minute (fatigue)
+CLIMB_LOOKBACK_S = 5 * 60  # ... et pas juste après une montée (la FC met quelques minutes à redescendre)
+CLIMB_RATE = 0.03       # montée = plus de 3 % de D+ sur les 5 minutes précédentes
 DEFAULT_HR_REST = 50    # FC repos / max par défaut si inconnues (TRIMP)
 DEFAULT_HR_MAX = 190
 
@@ -245,6 +248,21 @@ def _flat(points: list[Point], i: int) -> bool:
     return abs((p.alt - q.alt) / (p.dist - q.dist)) <= FLAT_GRADE
 
 
+def _after_climb(points: list[Point]) -> list[bool]:
+    """Pour chaque point : D+ des CLIMB_LOOKBACK_S secondes précédentes supérieur à CLIMB_RATE ?"""
+    ascent = [0.0]
+    for a, b in zip(points, points[1:]):
+        rise = (b.alt - a.alt) if a.alt is not None and b.alt is not None else 0.0
+        ascent.append(ascent[-1] + max(0.0, rise))
+    out, j = [], 0
+    for i, p in enumerate(points):
+        while p.t - points[j].t > CLIMB_LOOKBACK_S:
+            j += 1
+        dist = (p.dist or 0) - (points[j].dist or 0)
+        out.append(dist > 50 and (ascent[i] - ascent[j]) / dist > CLIMB_RATE)
+    return out
+
+
 def run_metrics(points: list[Point], hr_rest: float = DEFAULT_HR_REST, hr_max: float = DEFAULT_HR_MAX) -> dict:
     m: dict = {}
     # --- charge TRIMP : minutes en mouvement pondérées par l'intensité cardiaque
@@ -270,14 +288,16 @@ def run_metrics(points: list[Point], hr_rest: float = DEFAULT_HR_REST, hr_max: f
         m["power_decoupling_pct"] = _decoupling(m["power_first_half"], m["power_second_half"],
                                                 m["hr_first_half"], m["hr_second_half"])
 
-    # --- FC moyenne sur le plat dans la bande d'allure de référence
-    # --- sur le plat, hors échauffement : FC à allure de référence et efficacité vitesse/FC
+    # --- FC à allure de référence et efficacité vitesse/FC, sur des portions comparables d'une sortie
+    # à l'autre quel que soit son D+ : sur le plat, entre la 5e et la 60e minute (ni échauffement ni
+    # fatigue), et pas juste après une montée
     lo, hi = FIXED_PACE_BAND
     band, flat = [], []
+    climbed = _after_climb(points)
     acc = 0.0
     for i, p in enumerate(points):
         acc += p.dt
-        if acc <= WARMUP_S or not (p.dt and p.speed and p.hr) or not _flat(points, i):
+        if not WARMUP_S < acc <= FRESH_MAX_S or not (p.dt and p.speed and p.hr) or climbed[i] or not _flat(points, i):
             continue
         flat.append(p)
         if lo <= 1000 / p.speed <= hi:

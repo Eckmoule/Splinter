@@ -2,7 +2,7 @@
 
 Génère dans Data/SplinterDrive (synchronisé par Google Drive) :
 - LISEZMOI.md            profil, records, résumé récent, dictionnaire des colonnes
-- courses.csv            une ligne par sortie (route + trail)
+- courses.csv            une ligne par sortie de course à pied
 - tours.csv              une ligne par tour enregistré par la montre (issu des .fit), tout l'historique
 - sorties_recentes/      un fichier par sortie, un point toutes les 10 s, pour les 10 dernières sorties
 - semaines.csv           volume, intensité et forme par semaine
@@ -27,6 +27,19 @@ DETAIL_STEP_S = 10        # un point toutes les 10 s dans le détail
 RECENT_DIR = "sorties_recentes"
 OBSOLETE_FILES = ["courses_km.csv"]  # anciens fichiers d'export, supprimés du dossier
 MAX_FLAT_GAIN_PER_KM = 10  # m de D+ par km au-delà desquels le découplage n'est pas exporté
+
+# Terrain d'après le D+ enregistré (m par km). Le type Garmin (course / trail) ne reflète que
+# l'application lancée sur la montre : il n'est pas utilisé pour l'analyse.
+HILLY_GAIN_PER_KM, MOUNTAIN_GAIN_PER_KM = MAX_FLAT_GAIN_PER_KM, 25
+
+
+def terrain(d_plus: float | None, km: float | None) -> str:
+    """plat (< 10 m D+/km), vallonné (10-25), montagne (>= 25)."""
+    if not km:
+        return ""
+    per_km = (d_plus or 0) / km
+    return "plat" if per_km < HILLY_GAIN_PER_KM else "vallonné" if per_km < MOUNTAIN_GAIN_PER_KM else "montagne"
+
 
 RUN_TYPES = {"running": "route", "trail_running": "trail", "treadmill_running": "tapis",
              "track_running": "piste", "indoor_running": "intérieur"}
@@ -145,7 +158,8 @@ COURSES_COLUMNS = [
     ("id", "identifiant Garmin de la sortie (clé de jointure avec tours.csv et sorties_recentes/)"),
     ("date", "date locale de départ (AAAA-MM-JJ)"),
     ("heure", "heure locale de départ"),
-    ("type", "route, trail, tapis, piste"),
+    ("terrain", f"d'après le D+ par km : plat (< {HILLY_GAIN_PER_KM} m/km), vallonné "
+                f"({HILLY_GAIN_PER_KM}-{MOUNTAIN_GAIN_PER_KM} m/km), montagne (>= {MOUNTAIN_GAIN_PER_KM} m/km)"),
     ("nom", "nom de l'activité dans Garmin Connect"),
     ("distance_km", "distance"),
     ("duree", "durée totale h:mm:ss (pauses incluses)"),
@@ -188,9 +202,10 @@ COURSES_COLUMNS = [
     ("allure_2e_moitie", "allure moyenne de la 2e moitié"),
     ("decouplage_pct", "découplage allure/FC (Pa:HR) en % : perte d'efficacité (vitesse/FC) entre les "
                        "deux moitiés. < 5 % = bonne endurance aérobie sur cette durée. Seulement pour les "
-                       f"sorties route d'au moins 35 min avec au plus {MAX_FLAT_GAIN_PER_KM} m D+/km"),
+                       f"sorties d'au moins 35 min avec moins de {MAX_FLAT_GAIN_PER_KM} m D+/km"),
     (f"fc_allure_{_BAND}", f"FC moyenne sur le plat (pente < 2 %) quand l'allure est entre {_BAND_TXT}/km, "
-                           "hors 5 premières min ; indicateur de progression : baisse = meilleure forme"),
+                           "entre la 5e et la 60e minute et pas juste après une montée (quel que soit le D+ "
+                           "de la sortie) ; indicateur de progression : baisse = meilleure forme"),
     (f"min_allure_{_BAND}", f"minutes passées sur le plat à {_BAND_TXT}/km (la FC est fournie si >= 5 min)"),
 ]
 
@@ -198,13 +213,12 @@ COURSES_COLUMNS = [
 def _course_row(start_time: str, a: dict, health: dict, fm: dict) -> list:
     h = health.get(start_time[:10], {})
     km = (a.get("distance") or 0) / 1000
-    flat_road = ((a.get("activityType") or {}).get("typeKey") == "running" and km > 0
-                 and (a.get("elevationGain") or 0) / km <= MAX_FLAT_GAIN_PER_KM)
+    flat = terrain(a.get("elevationGain"), km) == "plat"
     return [
         a["activityId"],
         start_time[:10],
         start_time[11:16],
-        RUN_TYPES.get((a.get("activityType") or {}).get("typeKey"), ""),
+        terrain(a.get("elevationGain"), km),
         a.get("activityName") or "",
         _r((a.get("distance") or 0) / 1000, 2),
         _hms(a.get("duration")),
@@ -241,7 +255,7 @@ def _course_row(start_time: str, a: dict, health: dict, fm: dict) -> list:
         _r(fm.get("hr_second_half"), 0),
         _pace(fm.get("speed_first_half")),
         _pace(fm.get("speed_second_half")),
-        _r(fm.get("decoupling_pct"), 1) if flat_road else "",
+        _r(fm.get("decoupling_pct"), 1) if flat else "",
         _r(fm.get("hr_fixed_pace"), 0),
         _min(fm.get("fixed_pace_s")) if fm else "",
     ]
@@ -341,7 +355,7 @@ def _export_recent(out_dir: Path, runs) -> list[str]:
         path = FIT_DIR / f"{a['activityId']}.fit"
         if not path.exists():
             continue
-        name = f"{t[:10]}_{RUN_TYPES.get(a['activityType']['typeKey'], 'course')}_{a['activityId']}.csv"
+        name = f"{t[:10]}_{terrain(a.get('elevationGain'), (a.get('distance') or 0) / 1000) or 'course'}_{a['activityId']}.csv"
         points, _ = read_fit(path)
         _write_csv(folder / name, [c for c, _ in DETAIL_COLUMNS], _detail_rows(points))
         kept.append(name)
@@ -551,7 +565,7 @@ Données de santé personnelles : ne pas partager.
 
 ## À l'attention de Claude
 
-Ces fichiers décrivent l'entraînement de course à pied (route et trail) d'un coureur et ses
+Ces fichiers décrivent l'entraînement de course à pied d'un coureur et ses
 données de récupération. Utilise-les pour analyser sa progression, sa charge, sa récupération
 et l'aider à planifier. Les CSV sont en UTF-8, séparateur virgule, décimales avec un point.
 Les allures sont en min:s par km, les durées en h:mm:ss. Une cellule vide = donnée absente.

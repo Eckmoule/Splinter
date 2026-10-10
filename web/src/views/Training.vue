@@ -2,7 +2,7 @@
 // Entraînement : est-ce que je m'entraîne correctement, en ce moment et de manière générale ?
 // En ce moment : résumé par règles, charge (Forme / Fatigue / Fraîcheur), récupération.
 // En général : répartition de l'intensité, régularité, montée en charge, variété des séances.
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, inject, onMounted, ref, watch } from 'vue'
 import Card from '../kit/components/Card.vue'
 import ChartBox from '../kit/components/ChartBox.vue'
 import InfoTip from '../kit/components/InfoTip.vue'
@@ -43,6 +43,7 @@ async function load() {
 }
 onMounted(load)
 watch(months, load)
+watch(inject('dataVersion'), load) // après une mise à jour des données
 
 const fr = (v, d = 0) => num(v, d)
 const hours = (v) => `${Math.floor(v)} h ${String(Math.round((v % 1) * 60)).padStart(2, '0')}`

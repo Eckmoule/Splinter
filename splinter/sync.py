@@ -16,6 +16,7 @@ from datetime import date
 from garminconnect import GarminConnectAuthenticationError
 
 from splinter import activities, export, fit_analysis, health
+from splinter.sync_state import AlreadyRunning, sync_run
 from splinter.config import DB_PATH
 from splinter.garmin_client import connect, open_db
 
@@ -35,6 +36,15 @@ def main() -> None:
     parser.add_argument("--since", type=date.fromisoformat, help="début de l'historique santé (AAAA-MM-JJ)")
     args = parser.parse_args()
 
+    # une seule synchro à la fois (commande, tâche de nuit ou dashboard) ; résultat mémorisé
+    try:
+        with sync_run():
+            _sync(args)
+    except AlreadyRunning as e:
+        sys.exit(str(e))
+
+
+def _sync(args) -> None:
     try:
         api = connect()
     except GarminConnectAuthenticationError as e:

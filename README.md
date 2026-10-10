@@ -81,7 +81,10 @@ Claude depuis le téléphone. Lancement seul :
 .\.venv\Scripts\python -m splinter.dashboard
 ```
 
-Ouvre http://localhost:8050 (accessible uniquement depuis ce PC). Au premier lancement, ou quand
+Ouvre http://localhost:8050 (accessible uniquement depuis ce PC). En haut à droite : date de la dernière
+synchro réussie (détail au survol) et bouton **Mettre à jour**, qui lance `splinter.sync` en
+arrière-plan (récupération Garmin + export Drive) ; les pages se rechargent à la fin. Ouvrir le
+dashboard ne lance pas de synchro. Au premier lancement, ou quand
 les sources de `web/` ont changé, l'interface est compilée automatiquement (Node.js requis).
 
 - `splinter/api/` : API FastAPI en lecture seule sur `garmin.db`, sert aussi l'interface compilée.
@@ -111,7 +114,8 @@ Crée une tâche Windows « Splinter - synchro Garmin » qui lance `splinter.nig
   tâche qu'après ~10 min, alors que le PC se rendort au bout de 2 min) ;
 - au prochain démarrage si le PC était éteint.
 
-La synchro est ignorée si la dernière réussie date de moins de 6 h (`-IntervalleMin`). Le PC
+Une seule synchro tourne à la fois (verrou `Data/logs/sync.lock`, quel que soit le lanceur) ; le
+résultat de la dernière est gardé dans `Data/logs/derniere_synchro.json`. La synchro est ignorée si la dernière réussie date de moins de 6 h (`-IntervalleMin`). Le PC
 reste éveillé pendant la synchro puis 3 min pour laisser Google Drive envoyer l'export.
 Journal : `Data/logs/sync.log` (source du réveil, nouvelles sorties et nuits récupérées, dates
 les plus récentes exportées). Si les jetons Garmin expirent, la tâche échoue (voir le journal) :

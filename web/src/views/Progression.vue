@@ -2,7 +2,7 @@
 // Progression : est-ce que je progresse sur le long terme ?
 // Indicateurs principaux : FC à allure fixe, efficacité vitesse/FC, VO2max.
 // Contexte : découplage des sorties longues, FC repos et HRV, volume et plus longue sortie.
-import { computed, onMounted, ref } from 'vue'
+import { computed, inject, onMounted, ref, watch } from 'vue'
 import Card from '../kit/components/Card.vue'
 import ChartBox from '../kit/components/ChartBox.vue'
 import InfoTip from '../kit/components/InfoTip.vue'
@@ -13,7 +13,7 @@ import { km, num, signed } from '../kit/lib/format'
 const data = ref(null)
 const error = ref('')
 
-onMounted(async () => {
+async function load() {
   try {
     const res = await fetch('/api/progression')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -21,10 +21,12 @@ onMounted(async () => {
   } catch (e) {
     error.value = `Impossible de charger les données (${e.message}).`
   }
-})
+}
+onMounted(load)
+watch(inject('dataVersion'), load) // après une mise à jour des données
 
 const bpm = (v) => `${num(v)} bpm`
-const ef = (v) => num(v, 2)
+const ef = (v) => `${num(v, 2)} m`
 
 /** Tuile : valeur des 3 derniers mois et écart avec les 3 mêmes mois un an plus tôt. */
 function tile(key, fmt, lowerIsBetter, digits = 0, unit = '') {
@@ -40,7 +42,7 @@ const tiles = computed(() =>
   data.value
     ? {
         fixed: tile('hr_fixed_pace', bpm, true, 0, ' bpm'),
-        ef: tile('ef', ef, false, 2),
+        ef: tile('ef', ef, false, 2, ' m'),
         vo2: tile('vo2max', (v) => num(v), false),
         rhr: tile('rhr', bpm, true, 1, ' bpm'),
       }
@@ -113,12 +115,14 @@ const longestChart = computed(() => {
         <KpiCard :label="`FC à ${data.fixed_pace_band}/km`" :value="tiles.fixed.value" :note="tiles.fixed.note" :tone="tiles.fixed.tone">
           <template #info>
             <InfoTip label="Comparaison">
-              Moyenne des 3 derniers mois comparée aux 3 mêmes mois un an plus tôt : même saison, donc même
-              effet de la chaleur. Vert = mieux (FC plus basse, efficacité ou VO2max plus haute).
+              Valeur actuelle de la courbe correspondante (FC à allure fixe : médiane des 6 dernières semaines ;
+              distance par battement : moyenne des 6 dernières semaines ; FC repos : moyenne des 30 derniers
+              jours), comparée à la même période un an plus tôt : même saison, donc même effet de la chaleur.
+              Vert = mieux (FC plus basse, distance par battement ou VO2max plus haute).
             </InfoTip>
           </template>
         </KpiCard>
-        <KpiCard label="Efficacité (vitesse ÷ FC)" :value="tiles.ef.value" :note="tiles.ef.note" :tone="tiles.ef.tone" />
+        <KpiCard label="Distance par battement" :value="tiles.ef.value" :note="tiles.ef.note" :tone="tiles.ef.tone" />
         <KpiCard label="VO2max" :value="tiles.vo2.value" :note="tiles.vo2.note" :tone="tiles.vo2.tone" />
         <KpiCard label="FC repos" :value="tiles.rhr.value" :note="tiles.rhr.note" :tone="tiles.rhr.tone" />
       </section>
@@ -126,9 +130,10 @@ const longestChart = computed(() => {
       <Card :title="`FC sur le plat à ${data.fixed_pace_band}/km`" subtitle="Plus elle baisse, moins le cœur travaille pour la même vitesse">
         <template #actions>
           <InfoTip label="Méthode">
-            Pour chaque sortie route : FC moyenne sur les portions plates (pente &lt; 2 %) courues entre
-            {{ data.fixed_pace_band }}/km, hors 5 premières minutes, si au moins 5 minutes. La courbe est la médiane
-            des 6 semaines précédentes. La chaleur fait monter la FC : comparer de préférence les mêmes saisons.
+            Pour chaque sortie, quel que soit son dénivelé : FC moyenne sur les portions plates (pente &lt; 2 %)
+            courues entre {{ data.fixed_pace_band }}/km, entre la 5e et la 60e minute (ni échauffement ni fatigue)
+            et pas dans les 5 minutes qui suivent une montée ; il en faut au moins 5 minutes. La courbe est la
+            médiane des 6 semaines précédentes. La chaleur fait monter la FC : comparer de préférence les mêmes saisons.
           </InfoTip>
         </template>
         <ul class="legend">
@@ -138,26 +143,30 @@ const longestChart = computed(() => {
         <ChartBox :build="fixedChart" :height="280" label="FC à allure fixe par sortie et tendance" />
       </Card>
 
-      <Card title="Efficacité : vitesse ÷ FC" subtitle="Mètres par minute par battement de cœur, sorties continues sur route">
+      <Card title="Distance par battement de cœur" subtitle="Plus elle monte, plus tu avances à chaque battement : tu cours plus vite pour le même effort">
         <template #actions>
           <InfoTip label="Méthode">
-            Vitesse moyenne (m/min) divisée par la FC moyenne sur les portions plates, hors 5 premières minutes.
-            Sorties route d'au moins 30 min, hors séances de fractionné (tours de récupération). Plus c'est haut,
-            plus tu cours vite pour un même effort cardiaque. Courbe : moyenne des 6 semaines précédentes.
+            Mètres parcourus pour chaque battement de cœur : vitesse (en mètres par minute) divisée par la FC
+            (en battements par minute). Exemple : à 6:00/km (167 m/min) avec une FC de 155, tu avances de
+            1,08 m par battement. Si la même allure ne demande plus que 145 bpm, tu passes à 1,15 m :
+            ton cœur est plus efficace. Calculé pour les sorties continues d'au moins 30 min (hors fractionné),
+            quel que soit leur dénivelé, sur les portions plates courues entre la 5e et la 60e minute et pas
+            juste après une montée : l'échauffement, la fatigue et les montées faussent le calcul.
+            Courbe : moyenne des 6 semaines précédentes.
           </InfoTip>
         </template>
         <ul class="legend">
           <li><i class="pt" style="background: var(--s3)" />Sortie</li>
           <li><i style="background: var(--s3)" />Moyenne 6 semaines</li>
         </ul>
-        <ChartBox :build="efChart" :height="280" label="Efficacité vitesse sur FC par sortie et tendance" />
+        <ChartBox :build="efChart" :height="280" label="Distance par battement de cœur, par sortie et tendance" />
       </Card>
 
       <div class="two">
         <Card title="VO2max" subtitle="Estimation Garmin">
           <ChartBox :build="vo2Chart" :height="240" label="Évolution de la VO2max" />
         </Card>
-        <Card title="Découplage des sorties longues" subtitle="Sorties route ≥ 1 h sur le plat ; plus bas = meilleure endurance">
+        <Card title="Découplage des sorties longues" subtitle="Sorties ≥ 1 h sur terrain plat (< 10 m D+/km) ; plus bas = meilleure endurance">
           <template #actions>
             <InfoTip label="Méthode">
               Perte d'efficacité (vitesse ÷ FC) entre la 1re et la 2e moitié de la sortie. Sous 5 %, l'endurance

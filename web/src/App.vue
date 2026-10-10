@@ -1,6 +1,7 @@
 <script setup>
 // Coquille de l'application : en-tête, menu des pages, routage par ancre (#/page).
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, provide, ref } from 'vue'
+import SyncStatus from './components/SyncStatus.vue'
 import NavMenu from './kit/components/NavMenu.vue'
 import Progression from './views/Progression.vue'
 import Training from './views/Training.vue'
@@ -17,6 +18,10 @@ onMounted(() => window.addEventListener('hashchange', onHash))
 onBeforeUnmount(() => window.removeEventListener('hashchange', onHash))
 
 const route = computed(() => routes.find((r) => r.path === current.value) ?? routes[0])
+
+// incrémenté après une synchro réussie : les pages rechargent leurs données
+const dataVersion = ref(0)
+provide('dataVersion', dataVersion)
 </script>
 
 <template>
@@ -24,6 +29,7 @@ const route = computed(() => routes.find((r) => r.path === current.value) ?? rou
     <NavMenu :routes="routes" :current="route.path" />
     <span class="brand">Splinter</span>
     <span class="muted">{{ route.label }}</span>
+    <SyncStatus @updated="dataVersion++" />
   </header>
   <main>
     <component :is="route.component" />
